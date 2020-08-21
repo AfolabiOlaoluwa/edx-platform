@@ -17,7 +17,7 @@ import six
 from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
 from eventtracking import tracker
-from ipware.ip import get_ip
+from ipware.ip import get_client_ip
 
 from common.djangoapps.track import contexts, views
 
@@ -206,7 +206,7 @@ class TrackMiddleware(MiddlewareMixin):
 
     def get_request_ip_address(self, request):
         """Gets the IP address of the request"""
-        ip_address = get_ip(request)
+        ip_address, _ = get_client_ip(request)
         if ip_address is not None:
             return ip_address
         else:

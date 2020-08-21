@@ -110,6 +110,7 @@ class CountryMiddlewareTests(TestCase):
     def test_ip_address_is_none(self):
         # IP address is not defined in request.
         request = self.request_factory.get('/somewhere')
+        request.META = {}
         request.user = self.anonymous_user
         # Run process_request to set up the session in the request
         # to be able to override it.
