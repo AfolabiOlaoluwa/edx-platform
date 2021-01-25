@@ -63,7 +63,9 @@ from lms.djangoapps.courseware.models import (
     DynamicUpgradeDeadlineConfiguration,
     OrgDynamicUpgradeDeadlineConfiguration
 )
+from lms.djangoapps.courseware.toggles import COURSEWARE_PROCTORING_IMPROVEMENTS
 from lms.djangoapps.verify_student.models import SoftwareSecurePhotoVerification
+from lms.djangoapps.verify_student.services import IDVerificationService
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
 from openedx.core.djangoapps.enrollments.api import (
     _default_course_mode,
@@ -75,6 +77,8 @@ from openedx.core.djangoapps.site_configuration import helpers as configuration_
 from openedx.core.djangoapps.xmodule_django.models import NoneToEmptyManager
 from openedx.core.djangolib.model_mixins import DeletableByUserValue
 from openedx.core.toggles import ENTRANCE_EXAMS
+from xmodule.modulestore.django import modulestore
+from common.djangoapps.student.emails import send_proctoring_requirements_email
 from common.djangoapps.student.signals import ENROLL_STATUS_CHANGE, ENROLLMENT_TRACK_UPDATED, UNENROLL_DONE
 from common.djangoapps.track import contexts, segment
 from common.djangoapps.util.model_utils import emit_field_changed_events, get_changed_fields_dict
@@ -1318,6 +1322,19 @@ class CourseEnrollment(models.Model):
         from openedx.core.djangoapps.enrollments.permissions import ENROLL_IN_COURSE
         return not user.has_perm(ENROLL_IN_COURSE, course)
 
+    def has_proctoring_requirements(self, proctored_exams_enabled):
+        """
+        Returns a boolean value regarding whether course mode requires a proctored exam. Returns False if special
+        exams aren't enabled, proctored exams aren't enabled for the course, or if the course mode is audit.
+        """
+        if not settings.FEATURES.get('ENABLE_SPECIAL_EXAMS'):
+            return False
+        if not proctored_exams_enabled:
+            return False
+        if self.mode not in CourseMode.CERTIFICATE_RELEVANT_MODES:
+            return False
+        return True
+
     def update_enrollment(self, mode=None, is_active=None, skip_refund=False):
         """
         Updates an enrollment for a user in a class.  This includes options
@@ -1361,6 +1378,19 @@ class CourseEnrollment(models.Model):
                 self.send_signal(EnrollStatusChange.unenroll)
 
         if mode_changed:
+            if COURSEWARE_PROCTORING_IMPROVEMENTS.is_enabled(self.course_id):
+                # If mode changed to one that requires proctoring, send proctoring requirements email
+                course_module = modulestore().get_course(self.course.id)
+                proctored_exams_enabled = course_module.enable_proctored_exams
+                if self.has_proctoring_requirements(proctored_exams_enabled):
+                    id_verification_url = IDVerificationService.get_verify_location()
+                    email_context = {'user': self.user, 'course_name': self.course.display_name,
+                                    'proctoring_provider': course_module.proctoring_provider,
+                                    'proctoring_requirements_url': ('https://support.edx.org/hc/en-us/articles/'
+                                                                    '207249428-How-do-proctored-exams-work-'),
+                                    'id_verification_url': id_verification_url}
+                    send_proctoring_requirements_email(context=email_context)
+
             # Only emit mode change events when the user's enrollment
             # mode has changed from its previous setting
             self.emit_event(EVENT_NAME_ENROLLMENT_MODE_CHANGED)

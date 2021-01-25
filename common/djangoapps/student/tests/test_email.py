@@ -15,16 +15,14 @@ from django.test import TransactionTestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils.html import escape
+from edx_toggles.toggles.testutils import override_waffle_flag
 from mock import Mock, patch
 from six import text_type
 
 from common.djangoapps.edxmako.shortcuts import marketing_link, render_to_string
-from openedx.core.djangoapps.ace_common.tests.mixins import EmailTemplateTagMixin
-from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
-from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
-from openedx.core.djangolib.testing.utils import CacheIsolationMixin, CacheIsolationTestCase
-from openedx.core.lib.request_utils import safe_get_host
-from common.djangoapps.student.models import PendingEmailChange, Registration, UserProfile
+from common.djangoapps.course_modes.models import CourseMode
+from common.djangoapps.course_modes.tests.factories import CourseModeFactory
+from common.djangoapps.student.models import CourseEnrollment, PendingEmailChange, Registration, UserProfile
 from common.djangoapps.student.tests.factories import PendingEmailChangeFactory, UserFactory
 from common.djangoapps.student.views import (
     SETTING_CHANGE_INITIATED,
@@ -35,6 +33,16 @@ from common.djangoapps.student.views import (
 )
 from common.djangoapps.third_party_auth.views import inactive_user_view
 from common.djangoapps.util.testing import EventTestMixin
+from lms.djangoapps.courseware.toggles import COURSEWARE_PROCTORING_IMPROVEMENTS
+from lms.djangoapps.verify_student.services import IDVerificationService
+from openedx.core.djangoapps.ace_common.tests.mixins import EmailTemplateTagMixin
+from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
+from openedx.core.djangoapps.theming.tests.test_util import with_comprehensive_theme
+from openedx.core.djangolib.testing.utils import CacheIsolationMixin, CacheIsolationTestCase
+from openedx.core.lib.request_utils import safe_get_host
+from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.tests.django_utils import ModuleStoreTestCase
+from xmodule.modulestore.tests.factories import CourseFactory
 
 
 class TestException(Exception):
@@ -213,6 +221,98 @@ class ActivationEmailTests(EmailTemplateTagMixin, CacheIsolationTestCase):
             with patch('common.djangoapps.third_party_auth.pipeline.running', return_value=False):
                 inactive_user_view(request)
                 self.assertEqual(email.called, True, msg='method should have been called')
+
+
+@ddt.ddt
+@override_waffle_flag(COURSEWARE_PROCTORING_IMPROVEMENTS, active=True)
+@patch.dict('django.conf.settings.FEATURES', {'ENABLE_SPECIAL_EXAMS': True})
+class ProctoringRequirementsEmailTests(EmailTemplateTagMixin, ModuleStoreTestCase):
+    """
+    Test sending of the proctoring requirements email.
+    """
+    def setUp(self):
+        super().setUp()
+        self.non_proctored_course = CourseFactory()
+        self.proctored_course = CourseFactory(enable_proctored_exams=True)
+        self.user = UserFactory()
+
+    @ddt.data(*CourseMode.CERTIFICATE_RELEVANT_MODES)
+    def test_proctored_exams_not_enabled(self, mode):
+        CourseEnrollment.enroll(self.user, self.non_proctored_course.id, mode)
+        self.assertEqual(len(mail.outbox), 0)
+
+    @ddt.data(*CourseMode.CERTIFICATE_RELEVANT_MODES)
+    def test_enroll_in_certificate_relevant_mode(self, mode):
+        CourseEnrollment.enroll(self.user, self.proctored_course.id, mode)
+        self._assert_email()
+
+    @ddt.data(*CourseMode.AUDIT_MODES)
+    def test_enroll_in_audit_mode(self, mode):
+        CourseEnrollment.enroll(self.user, self.proctored_course.id, mode)
+        self.assertEqual(len(mail.outbox), 0)
+
+    @ddt.data(*CourseMode.CERTIFICATE_RELEVANT_MODES)
+    def test_upgrade_from_audit(self, mode):
+        enrollment = CourseEnrollment.enroll(self.user, self.proctored_course.id, CourseMode.AUDIT)
+        enrollment.update_enrollment(mode=mode)
+        self._assert_email()
+
+    @ddt.data(*CourseMode.AUDIT_MODES)
+    def test_downgrade(self, mode):
+        enrollment = CourseEnrollment.enroll(self.user, self.proctored_course.id, CourseMode.VERIFIED)
+        mail.outbox = []
+        enrollment.update_enrollment(mode=mode)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_mode_not_changed(self):
+        enrollment = CourseEnrollment.enroll(self.user, self.proctored_course.id, CourseMode.VERIFIED)
+        mail.outbox = []
+        enrollment.update_enrollment(mode=CourseMode.VERIFIED)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def _assert_email(self):
+        """
+        Verify that the email was sent.
+        """
+        assert len(mail.outbox) == 1
+
+        message = mail.outbox[0]
+        text = message.body
+        html = message.alternatives[0][0]
+
+        self.assertEqual(
+            message.subject,
+            "Proctoring requirements for {}".format(self.proctored_course.display_name)
+        )
+
+        for fragment in self._get_fragments():
+            assert fragment in text
+            assert escape(fragment) in html
+
+    def _get_fragments(self):
+        course_module = modulestore().get_course(self.proctored_course.id)
+        proctoring_provider = course_module.proctoring_provider
+        id_verification_url = IDVerificationService.get_verify_location()
+        return [
+            (
+                "You are enrolled in {} at {}. This course contains proctored exams.".format(
+                    self.proctored_course.display_name,
+                    settings.PLATFORM_NAME
+                )
+            ),
+            (
+                "Proctored exams are timed exams that you take while proctoring software "
+                "monitors your computer's desktop, webcam video, and audio. Your course uses {} "
+                "software for proctoring.".format(proctoring_provider)
+            ),
+            (
+                "Carefully review the system requirements as well as the steps to take a proctored "
+                "exam in order to ensure that you are prepared."
+            ),
+            ("https://support.edx.org/hc/en-us/articles/207249428-How-do-proctored-exams-work-"),
+            ("Before taking a graded proctored exam, you must have approved ID verification photos."),
+            id_verification_url
+        ]
 
 
 @unittest.skipUnless(settings.ROOT_URLCONF == 'lms.urls', "Test only valid in LMS")

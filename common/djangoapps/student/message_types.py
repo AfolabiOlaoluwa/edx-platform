@@ -39,3 +39,9 @@ class AccountActivation(BaseMessageType):
         super(AccountActivation, self).__init__(*args, **kwargs)
 
         self.options['transactional'] = True
+
+class ProctoringRequirements(BaseMessageType):
+    def __init__(self, *args, **kwargs):
+        super(ProctoringRequirements, self).__init__(*args, **kwargs)
+
+        self.options['transactional'] = True
