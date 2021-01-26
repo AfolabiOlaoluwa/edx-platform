@@ -62,14 +62,24 @@ def can_generate_allowlist_certificate(user, course_key):
     """
     if not auto_certificate_generation_enabled():
         # Automatic certificate generation is globally disabled
+        log.info(u'Automatic certificate generation is globally disabled. Certificate cannot be generated.')
         return False
 
     if CertificateInvalidation.has_certificate_invalidation(user, course_key):
         # The invalidation list overrides the allowlist
+        log.info(
+            u'{user} : {course} is on the certificate invalidation list. Certificate cannot be generated.'.format(
+                user=user.id,
+                course=course_key
+            ))
         return False
 
     if not _is_using_certificate_allowlist(course_key):
         # This course run is not using the allowlist feature
+        log.info(
+            u'{course} is not using the certificate allowlist. Certificate cannot be generated.'.format(
+                course=course_key
+            ))
         return False
 
     if CertificateWhitelist.objects.filter(user=user, course_id=course_key, whitelist=True).exists():
@@ -80,6 +90,10 @@ def can_generate_allowlist_certificate(user, course_key):
         cert = GeneratedCertificate.certificate_for_student(user, course_key)
         return _can_generate_allowlist_certificate_for_status(cert)
 
+    log.info(u'{user} : {course} is not on the certificate allowlist. Certificate cannot be generated.'.format(
+        user=user.id,
+        course=course_key
+    ))
     return False
 
 
@@ -99,10 +113,10 @@ def _can_generate_allowlist_certificate_for_status(cert):
 
     if cert.status == CertificateStatuses.downloadable:
         log.info(u'Certificate with status {status} already exists for {user} : {course}, and is NOT eligible for '
-                 u'allowlist generation'.format(status=cert.status,
-                                                user=cert.user.id,
-                                                course=cert.course_id
-                                                ))
+                 u'allowlist generation. Certificate cannot be generated.'.format(status=cert.status,
+                                                                                  user=cert.user.id,
+                                                                                  course=cert.course_id
+                                                                                  ))
         return False
 
     log.info(u'Certificate with status {status} already exists for {user} : {course}, and is eligible for '
